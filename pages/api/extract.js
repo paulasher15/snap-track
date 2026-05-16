@@ -25,7 +25,7 @@ export default async function handler(req, res) {
         "X-Title": "Snap Track",
       },
       body: JSON.stringify({
-        model: "openrouter/auto",
+        model: "google/gemma-4-31b-it:free",
         messages: [
           {
             role: "user",
