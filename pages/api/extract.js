@@ -1,6 +1,5 @@
 import { getServerSession } from "next-auth/next";
 import { authOptions } from "./auth/[...nextauth]";
-import { GoogleGenerativeAI } from "@google/generative-ai";
 
 export const config = {
   api: { bodyParser: { sizeLimit: "10mb" } },
@@ -17,39 +16,42 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: "Missing image data" });
 
   try {
-    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+    const apiKey = process.env.GEMINI_API_KEY;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${apiKey}`;
 
-    const prompt = `You are a transaction extractor. Analyze this image (receipt, bank statement, invoice, or expense photo) and extract transaction data.
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{
+          parts: [
+            {
+              text: `You are a transaction extractor. Analyze this image and extract transaction data.\n\nReturn ONLY a raw JSON array (no markdown, no backticks, no explanation). Each item:\n{\n  "date": "YYYY-MM-DD or best guess from today if unclear",\n  "description": "merchant or item name",\n  "amount": number (positive for expense, negative for income/refund),\n  "category": one of [Food, Transport, Shopping, Bills, Health, Entertainment, Other],\n  "notes": "any extra detail or empty string"\n}\n\nIf no transaction found, return: []`
+            },
+            {
+              inline_data: {
+                mime_type: mimeType,
+                data: imageBase64
+              }
+            }
+          ]
+        }]
+      }),
+    });
 
-Return ONLY a raw JSON array (no markdown, no backticks, no explanation). Each item:
-{
-  "date": "YYYY-MM-DD or best guess from today if unclear",
-  "description": "merchant or item name",
-  "amount": number (positive for expense, negative for income/refund),
-  "category": one of [Food, Transport, Shopping, Bills, Health, Entertainment, Other],
-  "notes": "any extra detail or empty string"
-}
+    if (!response.ok) {
+      const errData = await response.json();
+      throw new Error(errData.error?.message || "Gemini API error");
+    }
 
-If no transaction found, return: []`;
-
-    const result = await model.generateContent([
-      prompt,
-      {
-        inlineData: {
-          mimeType,
-          data: imageBase64,
-        },
-      },
-    ]);
-
-    const text = result.response.text();
+    const data = await response.json();
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "[]";
     const clean = text.replace(/```json|```/g, "").trim();
     const transactions = JSON.parse(clean);
 
     return res.status(200).json({ transactions });
   } catch (err) {
     console.error("Gemini extract error:", err);
-    return res.status(500).json({ error: "Failed to extract transactions: " + err.message });
+    return res.status(500).json({ error: "Failed to extract: " + err.message });
   }
 }
