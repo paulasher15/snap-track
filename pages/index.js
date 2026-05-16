@@ -1,5 +1,5 @@
 import { useSession, signIn, signOut } from "next-auth/react";
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 
 const categoryColors = {
   Food: "#f97316", Transport: "#3b82f6", Shopping: "#a855f7",
@@ -107,54 +107,81 @@ export default function Home() {
   const [showSheetSetup, setShowSheetSetup] = useState(false);
   const fileRef = useRef();
 
+  // Load saved sheet ID from localStorage on mount
+  useEffect(() => {
+    const saved = localStorage.getItem("snaptrack_sheet_id");
+    if (saved) setSheetId(saved);
+  }, []);
+
+  const saveSheetId = (id) => {
+    setSheetId(id);
+    localStorage.setItem("snaptrack_sheet_id", id);
+  };
+
+  const compressImage = (file) => new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        const MAX = 1024;
+        let { width, height } = img;
+        if (width > height && width > MAX) { height = Math.round((height * MAX) / width); width = MAX; }
+        else if (height > MAX) { width = Math.round((width * MAX) / height); height = MAX; }
+        canvas.width = width; canvas.height = height;
+        canvas.getContext("2d").drawImage(img, 0, 0, width, height);
+        const compressed = canvas.toDataURL("image/jpeg", 0.7);
+        resolve({ base64: compressed.split(",")[1], mimeType: "image/jpeg", previewUrl: compressed });
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+
   const processImage = async (file) => {
     if (!file?.type.startsWith("image/")) return;
     setLoading(true); setExtractStatus(null); setSheetStatus(null);
 
-    const reader = new FileReader();
-    reader.onload = async (e) => {
-      const base64 = e.target.result.split(",")[1];
-      setPreview(e.target.result);
+    try {
+      const { base64, mimeType, previewUrl } = await compressImage(file);
+      setPreview(previewUrl);
 
-      try {
-        // Step 1: Extract via Gemini
-        const extractRes = await fetch("/api/extract", {
+      // Step 1: Extract via Gemini
+      const extractRes = await fetch("/api/extract", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ imageBase64: base64, mimeType }),
+      });
+      const extractData = await extractRes.json();
+      if (!extractRes.ok) throw new Error(extractData.error);
+
+      const parsed = extractData.transactions;
+      if (!Array.isArray(parsed) || parsed.length === 0) {
+        setExtractStatus({ ok: false, msg: "No transactions found. Try a clearer photo." });
+        setLoading(false); return;
+      }
+
+      setTransactions(prev => [...prev, ...parsed]);
+      setExtractStatus({ ok: true, msg: `🔍 Extracted ${parsed.length} transaction${parsed.length > 1 ? "s" : ""}` });
+
+      // Step 2: Save to Google Sheet
+      if (sheetId) {
+        const sheetRes = await fetch("/api/append-sheet", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ imageBase64: base64, mimeType: file.type }),
+          body: JSON.stringify({ transactions: parsed, sheetId }),
         });
-        const extractData = await extractRes.json();
-        if (!extractRes.ok) throw new Error(extractData.error);
-
-        const parsed = extractData.transactions;
-        if (!Array.isArray(parsed) || parsed.length === 0) {
-          setExtractStatus({ ok: false, msg: "No transactions found. Try a clearer photo." });
-          setLoading(false); return;
+        const sheetData = await sheetRes.json();
+        if (sheetRes.ok) {
+          setSheetStatus({ ok: true, msg: `✅ ${parsed.length} row${parsed.length > 1 ? "s" : ""} saved to your Google Sheet!` });
+        } else {
+          setSheetStatus({ ok: false, msg: `⚠️ Sheet error: ${sheetData.error}` });
         }
-
-        setTransactions(prev => [...prev, ...parsed]);
-        setExtractStatus({ ok: true, msg: `🔍 Extracted ${parsed.length} transaction${parsed.length > 1 ? "s" : ""}` });
-
-        // Step 2: Save to Google Sheet
-        if (sheetId) {
-          const sheetRes = await fetch("/api/append-sheet", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ transactions: parsed, sheetId }),
-          });
-          const sheetData = await sheetRes.json();
-          if (sheetRes.ok) {
-            setSheetStatus({ ok: true, msg: `✅ ${parsed.length} row${parsed.length > 1 ? "s" : ""} saved to your Google Sheet!` });
-          } else {
-            setSheetStatus({ ok: false, msg: `⚠️ Sheet error: ${sheetData.error}` });
-          }
-        }
-      } catch (err) {
-        setExtractStatus({ ok: false, msg: `Error: ${err.message}` });
       }
-      setLoading(false);
-    };
-    reader.readAsDataURL(file);
+    } catch (err) {
+      setExtractStatus({ ok: false, msg: `Error: ${err.message}` });
+    }
+    setLoading(false);
   };
 
   if (status === "loading") {
@@ -207,7 +234,7 @@ export default function Home() {
         </div>
 
         {showSheetSetup && (
-          <SheetSetup sheetId={sheetId} onSave={(id) => { setSheetId(id); setShowSheetSetup(false); }} onCancel={() => setShowSheetSetup(false)} />
+          <SheetSetup sheetId={sheetId} onSave={(id) => { saveSheetId(id); setShowSheetSetup(false); }} onCancel={() => setShowSheetSetup(false)} />
         )}
 
         {!sheetId && !showSheetSetup && (
